@@ -18,6 +18,17 @@ from attackshark_k86.transport import K86Client, _descriptor_from_handle
 from attackshark_k86.protocol import parse_report_descriptor
 
 
+def _capture_exchange(record, connection, prefix, request, previous_exchange):
+    """Copy only an exchange produced for this request into the CLI record."""
+    exchange = connection.last_exchange
+    if exchange is None or exchange is previous_exchange or exchange.opcode != request.opcode:
+        return
+    record[f"{prefix}_tx"] = exchange.tx_hex
+    if exchange.rx_hex is not None:
+        record[f"{prefix}_rx"] = exchange.rx_hex
+    record[f"{prefix}_outcome"] = exchange.outcome
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--timeout", type=float, default=2.0)
@@ -44,18 +55,23 @@ def main(argv=None):
             record["descriptor"] = parse_report_descriptor(descriptor)
 
             # Exactly one identify exchange. Any error or unexpected ID stops here.
-            identify_raw = connection.feature_roundtrip(identify_query())
-            record["identify_tx"] = client.last_exchange.tx_hex if client.last_exchange else identify_query().encode().hex()
-            record["identify_rx"] = connection.last_exchange.rx_hex if connection.last_exchange else identify_raw.hex()
+            identify_request = identify_query()
+            previous_exchange = connection.last_exchange
+            try:
+                identify_raw = connection.feature_roundtrip(identify_request)
+            finally:
+                _capture_exchange(record, connection, "identify", identify_request, previous_exchange)
             device_id = parse_device_id(identify_raw)
             record["internal_id"] = device_id
             if device_id != EXPECTED_DEVICE_ID:
                 raise K86Error(f"expected internal ID {EXPECTED_DEVICE_ID}, received {device_id}; 0x85 not sent")
 
             # Exactly one configuration GET, enabled only after ID validation.
-            raw = connection.feature_roundtrip(profile_query, allow_configuration=True)
-            record["profile_tx"] = connection.last_exchange.tx_hex
-            record["profile_rx"] = connection.last_exchange.rx_hex
+            previous_exchange = connection.last_exchange
+            try:
+                raw = connection.feature_roundtrip(profile_query, allow_configuration=True)
+            finally:
+                _capture_exchange(record, connection, "profile", profile_query, previous_exchange)
             record["active_profile_index"] = decode_yc500_response(profile_query, raw)
             record["result"] = "success"
     except Exception as exc:

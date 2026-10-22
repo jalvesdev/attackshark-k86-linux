@@ -42,6 +42,10 @@ class TransportError(K86Error):
     pass
 
 
+class DeviceOpenError(TransportError):
+    """The selected HID node exists in enumeration but could not be opened."""
+
+
 class MalformedReport(K86Error):
     pass
 

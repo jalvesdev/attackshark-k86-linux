@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "Read-only Fedora HID transport and protocol codecs for ATTACK SHARK K86"
 requires-python = ">=3.10"
 license = { text = "MIT" }
-dependencies = ["hidapi>=0.14"]
+dependencies = ["hidapi>=0.15"]
 
 [project.scripts]
 k86-hid = "attackshark_k86.cli:main"

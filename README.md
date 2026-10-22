@@ -20,7 +20,7 @@ python3 -m venv .venv
 python -m pip install -e .
 ```
 
-A instalação resolve `hidapi` como dependência de execução. A biblioteca não instala nem altera regras/permissões do sistema.
+A instalação resolve `hidapi>=0.15` como dependência de execução. No Linux, a biblioteca seleciona a extensão hidraw (`hidraw`) da própria distribuição para usar o path dinâmico `/dev/hidrawN` coberto pela ACL da interface; não usa o backend libusb (`hid`) para abrir o path sysfs `BUS.PORT:CONFIG.INTERFACE`. A instalação não altera regras/permissões do sistema. Diagnóstico: [`docs/06.4-fedora-hidraw-open.md`](docs/06.4-fedora-hidraw-open.md).
 
 ## Simular a identificação
 
@@ -52,7 +52,7 @@ Isso envia uma única Feature Report de identificação `0x8F` à interface que 
 
 - `device.py`: inventário hidapi e seleção estrita de `3151:4015`, interface 2 e coleção `FFFF:0002`.
 - `protocol.py`: relatórios de 64 bytes, checksums Bit7/Bit8, allowlist de GETs, consulta de identificação e codecs/decoders yc500 sem I/O.
-- `transport.py`: adaptador hidapi, validação do descritor de Feature Report e envio/leitura com timeout observado, erros tipados e evento estruturado.
+- `transport.py`: adaptador hidapi com backend hidraw no Linux, validação do descritor de Feature Report, envio/leitura com timeout observado, erros tipados e evento estruturado.
 
 ## Ciclo 5
 
@@ -69,8 +69,13 @@ Instalação reproduzível no `.venv`, uso dos testes e CLI: este README. Após 
 Correção da seleção HID entre interfaces compostas e regressões: [`docs/06.2-interface-selection.md`](docs/06.2-interface-selection.md). A seleção continua estrita na interface 2 e não usa path hidraw fixo.
 
 Correção 6.3: quando o hidapi Linux retorna uso `0/0` e strings vazias, a biblioteca trata esses campos como insuficientes e valida o descritor da interface selecionada no handle ou por sysfs com vínculo à mesma interface USB. Veja [`docs/06.3-hid-metadata.md`](docs/06.3-hid-metadata.md). Nenhuma consulta física adicional foi executada.
+
 - `cli.py`: simulação com fixture real e comando explícito de identificação física.
 - `tests/`: testes automatizados com backend fake; nenhum teste abre HID.
+
+Correção de abertura no Fedora: a distribuição hidapi instalada expõe os backends `hid` (libusb) e `hidraw`; no Linux, a aplicação usa `hidraw` para que a ACL do nó concedida pela regra local seja suficiente. O seletor ainda exige VID:PID `3151:4015`, interface 2, USB e descritor esperado. A abertura/fechamento físico da interface 2 foi confirmada; veja [`docs/06.4-fedora-hidraw-open.md`](docs/06.4-fedora-hidraw-open.md).
+
+Correção 6.5: o registro de TX/RX da consulta de perfil usa o estado da conexão HID, que é onde os eventos de transporte ficam disponíveis. O log da tentativa anterior foi preservado; a falha aconteceu depois do roundtrip `0x8F` e antes de `0x85`. Testes simulados de sucesso e timeout estão em [`tests/test_read_active_profile.py`](tests/test_read_active_profile.py); causa e comando para uma futura execução única estão em [`docs/06.5-profile-integration.md`](docs/06.5-profile-integration.md). Nenhuma consulta física foi executada nesta correção.
 
 Ver [arquitetura e relatório do ciclo 4](docs/04-cycle-report.md) e [plano do protocolo](docs/04-hid-architecture.md).
 

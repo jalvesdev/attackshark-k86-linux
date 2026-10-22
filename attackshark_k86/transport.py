@@ -1,5 +1,6 @@
 """hidapi transport with a narrow allow-list and structured logs."""
 import logging
+import errno
 import os
 from pathlib import Path
 import re
@@ -11,7 +12,8 @@ from typing import Any
 
 from .device import (DeviceInfo, DeviceSelector, VENDOR_USAGE, VENDOR_USAGE_PAGE,
                      discover_devices, select_device)
-from .errors import (DeviceDisconnected, DescriptorMismatch, HidApiUnavailable,
+from .errors import (DeviceDisconnected, DeviceOpenError, DescriptorMismatch, HidApiUnavailable,
+                     K86Error,
                      IncorrectDevice, MalformedReport, PermissionDenied,
                      TransportError, TransportTimeout, UnauthorizedWrite)
 from .protocol import (EXPECTED_DEVICE_ID, READ_OPCODES, REPORT_ID, REPORT_LENGTH,
@@ -34,13 +36,21 @@ class ExchangeRecord:
 
 
 class HidApiBackend:
-    """Thin adapter around the `hid` module from the Python hidapi package."""
+    """Thin adapter selecting the native hidraw backend on Linux."""
     def __init__(self, module: Any | None = None):
         if module is None:
             try:
-                import hid as module  # type: ignore[no-redef]
+                if sys.platform.startswith("linux"):
+                    # The `hid` extension in some Python wheels is built with
+                    # libusb. A hidraw udev ACL does not grant USBFS access;
+                    # the same hidapi distribution also ships the `hidraw`
+                    # extension, which enumerates dynamic /dev/hidrawN paths.
+                    import hidraw as module  # type: ignore[no-redef]
+                else:
+                    import hid as module  # type: ignore[no-redef]
             except ImportError as exc:
-                raise HidApiUnavailable("install the Python hidapi package (import name: hid)") from exc
+                backend = "hidraw backend (hidapi>=0.15)" if sys.platform.startswith("linux") else "hidapi (import name: hid)"
+                raise HidApiUnavailable(f"install the Python {backend}") from exc
         self.module = module
 
     def enumerate(self, vendor_id: int, product_id: int):
@@ -48,8 +58,30 @@ class HidApiBackend:
 
     def open_path(self, path: Any):
         dev = self.module.device()
-        dev.open_path(path)
+        try:
+            dev.open_path(path)
+        except OSError as exc:
+            detail = ""
+            error_getter = getattr(dev, "error", None)
+            if error_getter is not None:
+                try:
+                    detail = str(error_getter() or "")
+                except Exception:
+                    pass
+            raise _classify_open_error(path, exc, detail) from exc
         return dev
+
+
+def _classify_open_error(path: Any, exc: OSError, backend_detail: str = "") -> K86Error:
+    detail = backend_detail.strip() or str(exc).strip() or type(exc).__name__
+    message = detail.lower()
+    if isinstance(exc, PermissionError) or exc.errno in (errno.EACCES, errno.EPERM) or any(
+            marker in message for marker in ("permission denied", "access denied", "operation not permitted")):
+        return PermissionDenied(f"permission denied opening selected HID path {path!r}: {detail}")
+    if exc.errno in (errno.ENOENT, errno.ENODEV, errno.ENXIO) or any(
+            marker in message for marker in ("no such device", "no such file or directory", "device not connected")):
+        return DeviceDisconnected(f"selected HID path {path!r} disappeared during open: {detail}")
+    return DeviceOpenError(f"could not open selected HID path {path!r}: {detail}")
 
 
 def _descriptor_from_handle(handle: Any, path: Any | None = None,
@@ -57,18 +89,25 @@ def _descriptor_from_handle(handle: Any, path: Any | None = None,
                             sysfs_root: Path = Path("/sys")) -> bytes:
     getter = getattr(handle, "get_report_descriptor", None)
     if getter is not None:
-        try:
-            result = getter(4096)
-        except TypeError:
-            buf = bytearray(4096)
-            result = getter(buf)
+        output_buffer = bytearray(4096)
+        calls = (lambda: getter(), lambda: getter(4096), lambda: getter(output_buffer))
+        for index, invoke in enumerate(calls):
+            try:
+                result = invoke()
+            except TypeError:
+                continue
+            if isinstance(result, tuple):
+                result = result[0]
             if isinstance(result, int):
                 if result < 0:
                     raise DescriptorMismatch("could not read HID report descriptor")
-                return bytes(buf[:result])
-        if isinstance(result, tuple):
-            result = result[0]
-        if not isinstance(result, int):
+                if index == 2 and 0 < result <= len(output_buffer):
+                    descriptor = bytes(output_buffer[:result])
+                    if descriptor:
+                        return descriptor
+                continue
+            if result is None:
+                continue
             try:
                 descriptor = bytes(result)
                 if descriptor and len(descriptor) <= 4096:
@@ -356,12 +395,12 @@ class K86Client:
             raise IncorrectDevice("selected device does not match the required VID:PID, interface, and usage")
         try:
             handle = self.backend.open_path(device.path)
+        except (PermissionDenied, DeviceDisconnected, DeviceOpenError):
+            raise
         except PermissionError as exc:
             raise PermissionDenied(str(exc)) from exc
         except OSError as exc:
-            if "permission" in str(exc).lower() or "access denied" in str(exc).lower():
-                raise PermissionDenied(str(exc)) from exc
-            raise DeviceDisconnected(str(exc)) from exc
+            raise _classify_open_error(device.path, exc) from exc
         try:
             validate_descriptor(_descriptor_from_handle(handle, device.path, device), device)
         except Exception:

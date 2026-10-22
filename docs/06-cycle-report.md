@@ -28,3 +28,9 @@ A instalação no ambiente virtual é necessária apenas se esse host não tiver
 Não há resposta física para decodificar nem conclusão local sobre correspondência com o protocolo. O protocolo está comprovado no código e em testes simulados; a semântica `reply[1]` vem da fonte pública sharkfin, não da unidade observada. O risco de bloqueio do hidapi permanece: a deadline não cancela uma chamada nativa bloqueada.
 
 Próxima etapa: executar manualmente o comando acima em Fedora com hidapi disponível e então anexar o JSONL produzido. Não recomendar qualquer outro teste físico neste ciclo. Não foram implementadas escritas nem alterações de firmware.
+
+## Retificação do ciclo 6.5 — integração do registro
+
+A tentativa posterior descrita em `docs/06.5-profile-integration.md` chegou ao roundtrip `0x8F`, mas a leitura de `client.last_exchange` interrompeu o script antes da validação do ID e da consulta `0x85`. Como a troca está registrada na conexão, o script agora coleta TX/RX e outcome de `connection.last_exchange`, sem declarar sucesso antes de validar a resposta do perfil. O JSONL físico existente foi preservado.
+
+Regressões simuladas cobrem `0x8F` seguido por `0x85`, timeout de identificação sem RX/perfil fictícios e ID interno inesperado que bloqueia `0x85`. A suíte completa passou: **42 testes** com `.venv/bin/python -m unittest discover -s tests -v`. Nenhuma consulta física foi executada durante a correção 6.5. O próximo comando físico permanece manual e único, conforme o plano da seção acima.

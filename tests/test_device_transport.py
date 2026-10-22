@@ -3,17 +3,19 @@ from pathlib import Path
 import tempfile
 import threading
 import time
+from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 
 from attackshark_k86.device import DeviceInfo, DeviceSelector, select_device
 from attackshark_k86.errors import (
-    AmbiguousDevice, DeviceDisconnected, DeviceNotFound, DescriptorMismatch,
+    AmbiguousDevice, DeviceDisconnected, DeviceNotFound, DeviceOpenError, DescriptorMismatch,
     IncorrectDevice, IncorrectInterface, MalformedReport, PermissionDenied, TransportError,
     TransportTimeout, UnauthorizedWrite,
 )
 from attackshark_k86.protocol import identify_query, parse_report_descriptor
 from attackshark_k86.transport import (
-    HidConnection, K86Client, _descriptor_from_handle, _descriptor_via_sysfs,
+    HidApiBackend, HidConnection, K86Client, _descriptor_from_handle, _descriptor_via_sysfs,
     validate_descriptor,
 )
 
@@ -43,7 +45,7 @@ class FakeHandle:
         self.sent = []
         self.closed = False
 
-    def get_report_descriptor(self, _size):
+    def get_report_descriptor(self, _size=None):
         return self.descriptor
 
     def send_feature_report(self, data):
@@ -78,6 +80,98 @@ class FakeBackend:
 
 
 class DeviceAndTransportTests(unittest.TestCase):
+    def test_installed_linux_backend_module_is_hidraw_without_enumerating(self):
+        with patch("attackshark_k86.transport.sys.platform", "linux"):
+            backend = HidApiBackend()
+        self.assertEqual(backend.module.__name__, "hidraw")
+
+    def test_linux_backend_prefers_hidraw_extension_from_hidapi_distribution(self):
+        calls = []
+
+        class RawDevice:
+            def open_path(self, path):
+                calls.append(("open", path))
+
+        raw_module = SimpleNamespace(
+            device=RawDevice,
+            enumerate=lambda vid, pid: calls.append(("enumerate", vid, pid)) or [],
+        )
+        libusb_module = SimpleNamespace(device=lambda: self.fail("libusb backend must not be selected"))
+        with patch("attackshark_k86.transport.sys.platform", "linux"), patch.dict(
+                "sys.modules", {"hidraw": raw_module, "hid": libusb_module}):
+            backend = HidApiBackend()
+            self.assertIs(backend.module, raw_module)
+            backend.enumerate(0x3151, 0x4015)
+            backend.open_path(b"/dev/hidraw43")
+        self.assertIn(("open", b"/dev/hidraw43"), calls)
+        self.assertIn(("enumerate", 0x3151, 0x4015), calls)
+
+    def test_native_open_errors_are_classified_without_guessing(self):
+        scenarios = [
+            ("Permission denied", PermissionDenied),
+            ("No such file or directory", DeviceDisconnected),
+            ("resource busy", DeviceOpenError),
+            ("", DeviceOpenError),
+        ]
+        for detail, expected_error in scenarios:
+            with self.subTest(detail=detail):
+                class FailedDevice:
+                    def open_path(self, _path):
+                        raise OSError("open failed")
+
+                    def error(self):
+                        return detail
+
+                backend = HidApiBackend(module=SimpleNamespace(device=FailedDevice))
+                with self.assertRaises(expected_error):
+                    backend.open_path(b"/dev/hidraw43")
+
+    def test_hidraw_open_close_uses_dynamic_interface_two_path_only(self):
+        class RawDevice:
+            def __init__(self):
+                self.path = None
+                self.closed = False
+                self.sent = []
+
+            def open_path(self, path):
+                self.path = path
+
+            def get_report_descriptor(self):
+                return list(REPORT_DESCRIPTOR)
+
+            def close(self):
+                self.closed = True
+
+        handle = RawDevice()
+        rows = [
+            info(path=b"/dev/hidraw70", interface_number=0, usage_page=1, usage=6).__dict__,
+            info(path=b"/dev/hidraw71", interface_number=1, usage_page=1, usage=2).__dict__,
+            info(path=b"/dev/hidraw43").__dict__,
+        ]
+        raw_module = SimpleNamespace(device=lambda: handle, enumerate=lambda _vid, _pid: rows)
+        backend = HidApiBackend(module=raw_module)
+        with K86Client(backend=backend).open() as connection:
+            self.assertEqual(connection.device.interface_number, 2)
+            self.assertEqual(connection.device.path, b"/dev/hidraw43")
+        self.assertEqual(handle.path, b"/dev/hidraw43")
+        self.assertTrue(handle.closed)
+        self.assertEqual(handle.sent, [])
+
+    def test_no_argument_hidraw_descriptor_getter_is_supported(self):
+        class NoArgHandle:
+            def get_report_descriptor(self):
+                return list(REPORT_DESCRIPTOR)
+
+        self.assertEqual(_descriptor_from_handle(NoArgHandle()), REPORT_DESCRIPTOR)
+
+    def test_buffer_style_hid_descriptor_getter_remains_supported(self):
+        class BufferHandle:
+            def get_report_descriptor(self, output):
+                output[:len(REPORT_DESCRIPTOR)] = REPORT_DESCRIPTOR
+                return len(REPORT_DESCRIPTOR)
+
+        self.assertEqual(_descriptor_from_handle(BufferHandle()), REPORT_DESCRIPTOR)
+
     def test_selection_requires_vid_pid_interface_and_usage_descriptor(self):
         chosen = select_device([info()])
         self.assertEqual(chosen.path, "/dev/hidraw-random")
