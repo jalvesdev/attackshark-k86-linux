@@ -1,0 +1,32 @@
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.coverage
+
+# IDE e sistema
+.vscode/
+.idea/
+.DS_Store
+
+# Arquivos locais
+.env
+.env.*
+!.env.example
+
+# Instaladores e binários proprietários
+*.exe
+*.dll
+*.msi
+
+# Ambiente e arquivos locais
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.env
+.env.*
+!.env.example
